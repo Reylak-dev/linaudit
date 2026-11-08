@@ -25,6 +25,15 @@ qué tan grave es y cómo arreglarlo. Funciona en Debian, Ubuntu, RHEL y sus der
 sudo apt install linaudit
 ```
 
+**Gestor de paquetes Nix** (con los flakes habilitados):
+```bash
+# Rama main
+sudo nix run github:alexiarstein/linaudit
+
+# Otra rama
+sudo nix run github:alexiarstein/linaudit/<rama>
+```
+
 **Desde el código fuente** (hace falta Rust 1.85 o más nuevo):
 
 ```bash
