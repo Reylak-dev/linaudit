@@ -132,7 +132,7 @@ sudo systemctl enable --now linaudit.timer
   findings as things to review, not as verdicts.
 - linaudit does not replace a formal compliance audit (CIS, STIG), a forensic analysis or an antivirus/EDR. It is a
   fast, honest health check that you can run as often as you like.
-- The checks for the Red Hat family (RHEL, Rocky, Alma, Fedora) are less tested than the Debian ones. Reports and
+- The checks for the Red Hat family (RHEL, Rocky, Alma, Fedora) and NixOS are less tested than the Debian ones. Reports and
   pull requests are very welcome.
 
 ## More
