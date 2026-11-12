@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::Context;
@@ -145,16 +146,40 @@ impl StaticParse {
             return;
         }
         if !is_glob(&name) {
-            // Un objetivo literal inexistente no es un error en sshd.
-            if resolve_in_root(&self.root, &abs).is_some() {
-                self.include_file(&abs, depth + 1);
+            // Un objetivo literal inexistente no es un error en sshd; uno que existe pero no se
+            // puede alcanzar (permisos, bucle de symlinks) sí deja el parseo incompleto.
+            match resolve_in_root(&self.root, &abs) {
+                Ok(_) => self.include_file(&abs, depth + 1),
+                Err(e) if is_missing(&e) => {}
+                Err(e) => self.skip(&abs, unreadable_reason(&e)),
             }
             return;
         }
-        let Some(host_dir) = resolve_in_root(&self.root, dir) else { return };
-        let mut names: Vec<String> = std::fs::read_dir(host_dir)
-            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| glob_match(&name, n)).collect())
-            .unwrap_or_default();
+        // Un directorio de drop-ins inexistente equivale a un glob sin coincidencias; uno que no se
+        // puede listar NO: sshd sí lo lee, y tratarlo como vacío daría PASS por defaults.
+        let host_dir = match resolve_in_root(&self.root, dir) {
+            Ok(d) => d,
+            Err(e) if is_missing(&e) => return,
+            Err(e) => return self.skip(dir, unreadable_reason(&e)),
+        };
+        let entries = match std::fs::read_dir(&host_dir) {
+            Ok(d) => d,
+            Err(e) if is_missing(&e) => return,
+            Err(e) => return self.skip(dir, unreadable_reason(&e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if glob_match(&name, &n) {
+                        names.push(n);
+                    }
+                }
+                // Listado cortado a la mitad: no se sabe qué archivos faltan.
+                Err(e) => return self.skip(dir, unreadable_reason(&e)),
+            }
+        }
         names.sort();
         for n in names {
             self.include_file(&dir.join(n), depth + 1);
@@ -167,13 +192,12 @@ impl StaticParse {
         if depth > MAX_INCLUDE_DEPTH {
             return self.skip(abs, "include nesting too deep");
         }
-        let Some(host) = resolve_in_root(&self.root, abs) else {
-            // sshd_config ausente: config vacía (lo reporta `run`); un glob que casa un symlink roto
-            // sí es un archivo que sshd intentaría leer.
-            if depth > 0 {
-                self.skip(abs, "unreadable");
-            }
-            return;
+        let host = match resolve_in_root(&self.root, abs) {
+            Ok(h) => h,
+            // sshd_config ausente o ilegible: config vacía (lo reporta `run` como SSH-000).
+            Err(_) if depth == 0 => return,
+            // Un glob que casa un symlink roto sí es un archivo que sshd intentaría leer.
+            Err(e) => return self.skip(abs, unreadable_reason(&e)),
         };
         if !self.visited.insert(host.clone()) {
             return;
@@ -184,7 +208,7 @@ impl StaticParse {
         match std::fs::metadata(&host) {
             Ok(m) if m.is_file() && m.len() <= MAX_FILE_BYTES => match std::fs::read_to_string(&host) {
                 Ok(text) => self.ingest(&text, depth),
-                Err(_) => self.skip(abs, "unreadable"),
+                Err(e) => self.skip(abs, unreadable_reason(&e)),
             },
             Ok(m) if m.is_file() => self.skip(abs, "too large"),
             _ => self.skip(abs, "not a regular file"),
@@ -194,8 +218,9 @@ impl StaticParse {
 
 /// Resuelve `abs` (ruta del sistema auditado) a una ruta real bajo `root`, siguiendo symlinks como
 /// en un chroot: un destino absoluto se toma relativo a `root` y `..` no sube de `root`. Devuelve
-/// `None` si algún componente no existe o hay demasiados saltos de symlink.
-fn resolve_in_root(root: &Path, abs: &Path) -> Option<PathBuf> {
+/// error si algún componente no existe (ver `is_missing`), no se puede examinar (permisos) o hay
+/// demasiados saltos de symlink.
+fn resolve_in_root(root: &Path, abs: &Path) -> io::Result<PathBuf> {
     fn push_components(stack: &mut Vec<OsString>, p: &Path) {
         for c in p.components().rev() {
             match c {
@@ -215,13 +240,13 @@ fn resolve_in_root(root: &Path, abs: &Path) -> Option<PathBuf> {
             continue;
         }
         let next = cur.join(&c);
-        let meta = std::fs::symlink_metadata(root.join(&next)).ok()?;
+        let meta = std::fs::symlink_metadata(root.join(&next))?;
         if meta.file_type().is_symlink() {
             hops += 1;
             if hops > 40 {
-                return None;
+                return Err(io::Error::other("too many levels of symbolic links"));
             }
-            let target = std::fs::read_link(root.join(&next)).ok()?;
+            let target = std::fs::read_link(root.join(&next))?;
             if target.is_absolute() {
                 cur = PathBuf::new();
             }
@@ -230,7 +255,21 @@ fn resolve_in_root(root: &Path, abs: &Path) -> Option<PathBuf> {
             cur = next;
         }
     }
-    Some(root.join(cur))
+    Ok(root.join(cur))
+}
+
+/// La ruta no existe (o un componente intermedio no es un directorio): para sshd es lo mismo que
+/// un glob sin coincidencias, no un archivo omitido.
+fn is_missing(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+}
+
+/// Motivo corto para `skipped`.
+fn unreadable_reason(e: &io::Error) -> &'static str {
+    match e.kind() {
+        io::ErrorKind::PermissionDenied => "permission denied",
+        _ => "unreadable",
+    }
 }
 
 /// Glob de un componente con `*` y `?`. Como glob(3), un comodín no casa un `.` inicial.
@@ -652,6 +691,63 @@ mod tests {
         assert_eq!(r["SSH-005"].status, Status::Warn);
         // Fijado antes de la omisión: sigue siendo autoritativo.
         assert_eq!(r["SSH-002"].status, Status::Pass);
+    }
+
+    /// Corre el parseo estático con `dir` sin permisos (0o000) y lo restaura antes de volver, para
+    /// que el fixture se pueda borrar. `None` si se corre como root (los permisos no aplican).
+    fn static_cfg_with_locked_dir(files: &[(&str, &str)], dir: &str) -> Option<SshdConfig> {
+        let fx = Fixture::new();
+        for (path, text) in files {
+            fx.file(path, text);
+        }
+        fx.mode(dir, 0o000);
+        let ctx = fx.ctx();
+        let cfg = if std::fs::read_dir(ctx.path(dir)).is_ok() { None } else { Some(SshdConfig::from_static(&ctx)) };
+        fx.mode(dir, 0o755);
+        cfg
+    }
+
+    #[test]
+    fn directorio_de_dropins_ilegible_no_da_pass_falso() {
+        let Some(cfg) = static_cfg_with_locked_dir(
+            &[
+                ("/etc/ssh/sshd_config", "PasswordAuthentication no\nInclude /etc/ssh/sshd_config.d/*.conf\nX11Forwarding no\n"),
+                ("/etc/ssh/sshd_config.d/10-a.conf", "PermitEmptyPasswords yes\nX11Forwarding yes\n"),
+            ],
+            "/etc/ssh/sshd_config.d",
+        ) else {
+            return eprintln!("omitido: corriendo como root");
+        };
+        assert_eq!(cfg.skipped, ["/etc/ssh/sshd_config.d (permission denied)"]);
+        let r = eval(&cfg);
+        // Ausente: caería al default "no" aunque el drop-in ilegible diga "yes".
+        assert_eq!(r["SSH-003"].status, Status::Warn);
+        // Fijado después del Include, que el drop-in pudo ganar.
+        assert_eq!(r["SSH-005"].status, Status::Warn);
+        // Fijado antes del Include: sigue siendo autoritativo.
+        assert_eq!(r["SSH-002"].status, Status::Pass);
+    }
+
+    #[test]
+    fn include_literal_en_directorio_ilegible_no_da_pass_falso() {
+        let Some(cfg) = static_cfg_with_locked_dir(
+            &[
+                ("/etc/ssh/sshd_config", "Include /etc/ssh/private/extra.conf\n"),
+                ("/etc/ssh/private/extra.conf", "PermitEmptyPasswords yes\n"),
+            ],
+            "/etc/ssh/private",
+        ) else {
+            return eprintln!("omitido: corriendo como root");
+        };
+        assert_eq!(cfg.skipped, ["/etc/ssh/private/extra.conf (permission denied)"]);
+        assert_eq!(eval(&cfg)["SSH-003"].status, Status::Warn);
+    }
+
+    #[test]
+    fn directorio_de_dropins_inexistente_no_es_omision() {
+        let cfg = static_cfg(&[("/etc/ssh/sshd_config", "PasswordAuthentication no\nInclude /etc/ssh/sshd_config.d/*.conf\n")]);
+        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
+        assert_eq!(eval(&cfg)["SSH-003"].status, Status::Pass);
     }
 
     #[test]

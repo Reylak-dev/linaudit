@@ -5,7 +5,7 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: linaudit 0.3.0\n"
+"Project-Id-Version: linaudit 0.3.1\n"
 "Report-Msgid-Bugs-To: https://github.com/alexiarstein/linaudit/issues\n"
 "Language: \n"
 "MIME-Version: 1.0\n"

@@ -1,3 +1,14 @@
+linaudit (0.3.1-1) unstable; urgency=medium
+
+  * New upstream release.
+  * SSH (static parse, without sshd -T): an Include directory or file that
+    exists but cannot be read (permission denied, symlink loop) is now
+    reported as skipped, so the settings it could set are shown as
+    undetermined instead of passing on sshd defaults. A missing Include
+    target is still ignored, as sshd does.
+
+ -- Alexia Michelle <alexia@lexiworks.dev>  Thu, 12 Nov 2026 12:58:50 -0300
+
 linaudit (0.3.0-1) unstable; urgency=medium
 
   * New upstream release.
@@ -6,6 +17,13 @@ linaudit (0.3.0-1) unstable; urgency=medium
     Debian security tracker. N/A when debsecan is not installed.
   * PER-012: decode the taint mask into its flags and list the modules that
     tainted the kernel, e.g. "tainted=12801 (P W O E): nvidia(POE), ...".
+  * SSH (static parse, without sshd -T): follow sshd's Include precedence.
+    Includes expand in place and the first value wins, Match only ends the
+    file it appears in, paths resolve inside the audited root, and skipped
+    files make settings undetermined instead of a false PASS (GitHub #14).
+  * Score: a check module that crashes now marks the run incomplete and caps
+    the score at 6/10, instead of silently dropping a whole category
+    (GitHub #11).
   * debian/control: suggest debsecan.
 
  -- Alexia Michelle <alexia@lexiworks.dev>  Thu, 12 Nov 2026 00:15:33 -0300
